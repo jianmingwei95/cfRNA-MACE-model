@@ -1,0 +1,330 @@
+# ============================================================
+# HPC Permutation Test - Multi-Process Parallel Version (64 Cores)
+# Run 10 permutations in parallel within a single job
+# ============================================================
+
+import numpy as np
+import pandas as pd
+from collections import Counter
+from sklearn.model_selection import LeaveOneOut
+from sksurv.linear_model import CoxPHSurvivalAnalysis
+from sksurv.util import Surv
+from sksurv.metrics import concordance_index_censored
+from sklearn.metrics import roc_auc_score, average_precision_score
+from lifelines import CoxPHFitter
+from multiprocessing import Pool
+import warnings
+import time as time_module
+warnings.filterwarnings("ignore")
+
+# ============================================================
+# Configuration
+# ============================================================
+N_PERMUTATIONS = 10
+N_FEATURES = 10
+RANDOM_SEED_START = 42
+N_PROCESSES = 10  # Number of parallel processes
+
+print("="*80)
+print(" 🚀 HPC PERMUTATION TEST - Multi-Process Parallel Version")
+print("="*80)
+print(f"\n⚙️  Configuration:")
+print(f"   Permutations: {N_PERMUTATIONS}")
+print(f"   Parallel processes: {N_PROCESSES}")
+print(f"   Features per fold: {N_FEATURES}")
+
+# ============================================================
+# Load Data
+# ============================================================
+print(f"\n📂 Loading data...")
+df = pd.read_csv("survival_data_cleanqc.csv")
+X = df.drop(columns=["EP_major", "EP_major_time", "STUDY_NUMBER"])
+y_original = df["EP_major"].astype(int)
+time = df["EP_major_time"]
+
+print(f"\n📊 Dataset:")
+print(f"   Samples : {len(X)}")
+print(f"   Events  : {y_original.sum()} ({y_original.mean()*100:.1f}%)")
+print(f"   Features: {X.shape[1]}")
+
+# ============================================================
+# Core Function: Feature Selection
+# ============================================================
+def select_top_n_features(X_train, time_train, y_train, n=10, corr_threshold=0.7):
+    """Select Top N low-correlated features based on univariate C-index"""
+    univariate_cindices = {}
+    
+    for col in X_train.columns:
+        try:
+            df_cox = pd.DataFrame({
+                'time': time_train.values,
+                'event': y_train.values,
+                'feature': X_train[col].values
+            })
+            
+            cph = CoxPHFitter()
+            cph.fit(df_cox, duration_col='time', event_col='event')
+            
+            univariate_cindices[col] = cph.concordance_index_
+        except:
+            univariate_cindices[col] = 0.5
+    
+    sorted_features = sorted(
+        univariate_cindices.items(), 
+        key=lambda x: x[1], 
+        reverse=True
+    )
+    
+    selected = []
+    
+    for feat, c_idx in sorted_features:
+        if len(selected) >= n:
+            break
+        
+        if len(selected) == 0:
+            selected.append(feat)
+        else:
+            max_corr = max([
+                abs(X_train[feat].corr(X_train[sf])) 
+                for sf in selected
+            ])
+            
+            if max_corr < corr_threshold:
+                selected.append(feat)
+    
+    if len(selected) < n:
+        for feat, c_idx in sorted_features:
+            if feat not in selected:
+                selected.append(feat)
+                if len(selected) >= n:
+                    break
+    
+    return selected[:n]
+
+# ============================================================
+# Core Function: Run a Single Permutation Experiment
+# ============================================================
+def run_single_permutation(perm_id):
+    """
+    Run a single permutation experiment and save results
+    
+    Parameters:
+        perm_id: Permutation ID (1-10)
+    
+    Returns:
+        Dictionary of performance metrics
+    """
+    start_time = time_module.time()
+    
+    print(f"\n[Process {perm_id}] 🔄 Starting permutation {perm_id}...")
+    print(f"[Process {perm_id}] Seed: {RANDOM_SEED_START + perm_id - 1}")
+    
+    # Shuffle labels
+    np.random.seed(RANDOM_SEED_START + perm_id - 1)
+    y_permuted = y_original.sample(frac=1, random_state=RANDOM_SEED_START + perm_id - 1).reset_index(drop=True)
+    
+    print(f"[Process {perm_id}] Shuffled event rate: {y_permuted.mean()*100:.1f}%")
+    
+    loo = LeaveOneOut()
+    
+    risk_scores = []
+    y_true = []
+    time_true = []
+    selected_features_all = []
+    feature_counter = Counter()
+    
+    print(f"[Process {perm_id}] 🔬 Running LOOCV ({len(X)} folds)...")
+    
+    fold_count = 0
+    for fold_id, (train_idx, test_idx) in enumerate(loo.split(X), start=1):
+        X_train = X.iloc[train_idx]
+        X_test = X.iloc[test_idx]
+        y_train = y_permuted.iloc[train_idx]
+        y_test = y_permuted.iloc[test_idx]
+        time_train = time.iloc[train_idx]
+        time_test = time.iloc[test_idx]
+        
+        # Step 1: Select Top N features on the training set
+        selected_features = select_top_n_features(
+            X_train, time_train, y_train,
+            n=N_FEATURES,
+            corr_threshold=0.7
+        )
+        
+        selected_features_all.append(selected_features)
+        feature_counter.update(selected_features)
+        
+        # Step 2: Train model using selected features
+        X_train_selected = X_train[selected_features]
+        X_test_selected = X_test[selected_features]
+        
+        y_surv_train = Surv.from_arrays(
+            event=y_train.astype(bool).values,
+            time=time_train.values
+        )
+        
+        try:
+            model = CoxPHSurvivalAnalysis(alpha=0.1)
+            model.fit(X_train_selected.values, y_surv_train)
+            
+            risk_score = model.predict(X_test_selected.values)[0]
+        except:
+            risk_score = np.nan
+        
+        risk_scores.append(risk_score)
+        y_true.append(y_test.values[0])
+        time_true.append(time_test.values[0])
+        
+        fold_count += 1
+        
+        # Print progress every 50 folds
+        if fold_count % 50 == 0:
+            print(f"[Process {perm_id}]    Progress: {fold_count}/{len(X)} folds ({fold_count/len(X)*100:.1f}%)")
+    
+    y_true = np.array(y_true)
+    time_true = np.array(time_true)
+    risk_scores = np.array(risk_scores)
+    
+    print(f"[Process {perm_id}] ✅ LOOCV completed!")
+    
+    # Calculate performance metrics
+    valid = ~np.isnan(risk_scores)
+    
+    c_index = concordance_index_censored(
+        y_true[valid].astype(bool),
+        time_true[valid],
+        risk_scores[valid]
+    )[0]
+    
+    roc_auc = roc_auc_score(y_true[valid], risk_scores[valid])
+    pr_auc = average_precision_score(y_true[valid], risk_scores[valid])
+    
+    median_risk = np.median(risk_scores[valid])
+    high_risk = risk_scores[valid] > median_risk
+    low_risk = ~high_risk
+    
+    event_rate_high = y_true[valid][high_risk].mean()
+    event_rate_low = y_true[valid][low_risk].mean()
+    risk_ratio = event_rate_high / (event_rate_low + 1e-10)
+    
+    elapsed_time = time_module.time() - start_time
+    
+    print(f"[Process {perm_id}] 📊 Performance:")
+    print(f"[Process {perm_id}]    C-Index  : {c_index:.3f}")
+    print(f"[Process {perm_id}]    ROC-AUC  : {roc_auc:.3f}")
+    print(f"[Process {perm_id}]    PR-AUC   : {pr_auc:.3f}")
+    print(f"[Process {perm_id}]    Time     : {elapsed_time/60:.1f} min")
+    
+    # Save Table 1: Performance
+    performance_df = pd.DataFrame([{
+        'Method': f'Permutation_{perm_id}_Nested_LOOCV_Cox_Cindex',
+        'Permutation_ID': perm_id,
+        'Random_Seed': RANDOM_SEED_START + perm_id - 1,
+        'N_Features': N_FEATURES,
+        'C_Index': c_index,
+        'ROC_AUC': roc_auc,
+        'PR_AUC': pr_auc,
+        'Risk_Ratio': risk_ratio,
+        'Event_Rate_High': event_rate_high,
+        'Event_Rate_Low': event_rate_low,
+        'Valid_Predictions': valid.sum(),
+        'Total_Samples': len(risk_scores),
+        'Runtime_Minutes': elapsed_time / 60
+    }])
+    
+    filename_perf = f"strict_nested_loocv_10features_performance_perm{perm_id}.csv"
+    performance_df.to_csv(filename_perf, index=False)
+    
+    # Save Table 2: Feature Stability
+    feature_stability_df = pd.DataFrame([
+        {
+            'Feature': feat,
+            'Count': count,
+            'Frequency': count / len(X),
+            'Percentage': f"{count/len(X)*100:.1f}%"
+        }
+        for feat, count in feature_counter.most_common()
+    ])
+    
+    filename_feat = f"strict_nested_loocv_10features_feature_stability_perm{perm_id}.csv"
+    feature_stability_df.to_csv(filename_feat, index=False)
+    
+    # Save Table 3: Fold Details
+    fold_details_df = pd.DataFrame({
+        'Fold': range(1, len(X) + 1),
+        'Event': y_true,
+        'Time': time_true,
+        'RiskScore': risk_scores,
+        'Valid': valid,
+        'Features': [','.join(f) for f in selected_features_all]
+    })
+    
+    filename_fold = f"strict_nested_loocv_10features_fold_details_perm{perm_id}.csv"
+    fold_details_df.to_csv(filename_fold, index=False)
+    
+    print(f"[Process {perm_id}] 💾 Files saved:")
+    print(f"[Process {perm_id}]    • {filename_perf}")
+    print(f"[Process {perm_id}]    • {filename_feat}")
+    print(f"[Process {perm_id}]    • {filename_fold}")
+    print(f"[Process {perm_id}] ✅ Completed in {elapsed_time/60:.1f} minutes!")
+    
+    return {
+        'perm_id': perm_id,
+        'c_index': c_index,
+        'roc_auc': roc_auc,
+        'pr_auc': pr_auc,
+        'runtime_minutes': elapsed_time / 60
+    }
+
+# ============================================================
+# Main Program: Run 10 Permutations in Parallel
+# ============================================================
+if __name__ == '__main__':
+    print(f"\n{'='*80}")
+    print(f" 🎯 Starting {N_PERMUTATIONS} permutations in parallel with {N_PROCESSES} processes")
+    print(f"{'='*80}")
+    
+    overall_start = time_module.time()
+    
+    # Run permutations in parallel using a process pool
+    with Pool(processes=N_PROCESSES) as pool:
+        all_results = pool.map(run_single_permutation, range(1, N_PERMUTATIONS + 1))
+    
+    overall_elapsed = time_module.time() - overall_start
+    
+    # Summarise results
+    print(f"\n{'='*80}")
+    print(f" 📊 SUMMARY OF ALL {N_PERMUTATIONS} PERMUTATIONS")
+    print(f"{'='*80}")
+    
+    summary_df = pd.DataFrame(all_results)
+    summary_df.to_csv("permutation_test_all_results_summary.csv", index=False)
+    
+    print(f"\n🎯 Performance Summary:")
+    print(f"   C-Index  : {summary_df['c_index'].mean():.3f} ± {summary_df['c_index'].std():.3f}")
+    print(f"   ROC-AUC  : {summary_df['roc_auc'].mean():.3f} ± {summary_df['roc_auc'].std():.3f}")
+    print(f"   PR-AUC   : {summary_df['pr_auc'].mean():.3f} ± {summary_df['pr_auc'].std():.3f}")
+    
+    print(f"\n⏱️  Runtime Summary:")
+    print(f"   Total runtime    : {overall_elapsed/60:.1f} minutes ({overall_elapsed/3600:.2f} hours)")
+    print(f"   Avg per permutation: {summary_df['runtime_minutes'].mean():.1f} minutes")
+    print(f"   Min runtime      : {summary_df['runtime_minutes'].min():.1f} minutes")
+    print(f"   Max runtime      : {summary_df['runtime_minutes'].max():.1f} minutes")
+    
+    print(f"\n📋 Individual Results:")
+    for idx, row in summary_df.iterrows():
+        print(f"   Perm-{row['perm_id']}: C-Index={row['c_index']:.3f}, "
+              f"ROC-AUC={row['roc_auc']:.3f}, PR-AUC={row['pr_auc']:.3f}, "
+              f"Time={row['runtime_minutes']:.1f}min")
+    
+    print(f"\n💾 All files saved:")
+    print(f"   • permutation_test_all_results_summary.csv (summary)")
+    for i in range(1, N_PERMUTATIONS + 1):
+        print(f"   • strict_nested_loocv_10features_performance_perm{i}.csv")
+        print(f"   • strict_nested_loocv_10features_feature_stability_perm{i}.csv")
+        print(f"   • strict_nested_loocv_10features_fold_details_perm{i}.csv")
+    
+    print(f"\n{'='*80}")
+    print(f" ✅ ALL {N_PERMUTATIONS} PERMUTATION TESTS COMPLETED!")
+    print(f" 🎉 Total time: {overall_elapsed/3600:.2f} hours")
+    print(f"{'='*80}")

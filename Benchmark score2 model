@@ -1,0 +1,237 @@
+import pandas as pd
+import numpy as np
+from lifelines import CoxPHFitter
+from lifelines.utils import concordance_index
+from sklearn.metrics import roc_auc_score, average_precision_score
+from scipy import stats
+
+# ==============================
+# Load data
+# ==============================
+df_clin = pd.read_csv("patient_risk_scores.csv")
+df_gene = pd.read_csv("strict_nested_loocv_merged.csv")
+
+df = df_clin.merge(df_gene, on="STUDY_NUMBER")
+
+time_col = "EP_major_time"
+event_col = "EP_major"
+risk_col = "RiskScore"
+
+clinical_scores = ["SMART_ORIG_LP","SMART2_LP","SMART_REACH_LP"]
+
+df = df[[time_col,event_col,risk_col]+clinical_scores].dropna().copy()
+df[event_col] = df[event_col].astype(int)
+
+y = df[event_col].values
+t = df[time_col].values
+
+# ==============================
+# Metric functions
+# ==============================
+def metric_cindex(y,t,p):
+    return concordance_index(t,-p,y)
+
+def metric_auc(y,t,p):
+    return roc_auc_score(y,p)
+
+def metric_pr(y,t,p):
+    return average_precision_score(y,p)
+
+# ==============================
+# Bootstrap CI + p-value
+# ==============================
+def bootstrap_ci(metric,y,t,p,n_boot=2000):
+    vals=[]
+    n=len(y)
+    rng=np.random.default_rng(42)
+
+    for _ in range(n_boot):
+        idx=rng.integers(0,n,n)
+
+        if len(np.unique(y[idx]))<2:
+            continue
+
+        vals.append(metric(y[idx],t[idx],p[idx]))
+
+    vals=np.array(vals)
+
+    return np.percentile(vals,[2.5,97.5])
+
+def bootstrap_delta(metric,y,t,p1,p2,n_boot=2000):
+    diffs=[]
+    n=len(y)
+    rng=np.random.default_rng(42)
+
+    for _ in range(n_boot):
+        idx=rng.integers(0,n,n)
+
+        if len(np.unique(y[idx]))<2:
+            continue
+
+        v1=metric(y[idx],t[idx],p1[idx])
+        v2=metric(y[idx],t[idx],p2[idx])
+
+        diffs.append(v2-v1)
+
+    diffs=np.array(diffs)
+
+    mean=diffs.mean()
+    ci=np.percentile(diffs,[2.5,97.5])
+
+    p=2*min((diffs<=0).mean(),(diffs>=0).mean())
+
+    return mean,ci,p
+
+# ==============================
+# DeLong test for AUC
+# ==============================
+def compute_midrank(x):
+
+    J=np.argsort(x)
+    Z=x[J]
+    N=len(x)
+
+    T=np.zeros(N)
+
+    i=0
+
+    while i<N:
+
+        j=i
+
+        while j<N and Z[j]==Z[i]:
+            j+=1
+
+        T[i:j]=0.5*(i+j-1)+1
+
+        i=j
+
+    T2=np.empty(N)
+    T2[J]=T
+
+    return T2
+
+def fast_delong(preds,m):
+
+    n=preds.shape[1]-m
+
+    pos=preds[:,:m]
+    neg=preds[:,m:]
+
+    k=preds.shape[0]
+
+    tx=np.zeros([k,m])
+    ty=np.zeros([k,n])
+    tz=np.zeros([k,m+n])
+
+    for r in range(k):
+        tx[r]=compute_midrank(pos[r])
+        ty[r]=compute_midrank(neg[r])
+        tz[r]=compute_midrank(preds[r])
+
+    aucs=tz[:,:m].sum(axis=1)/m/n-(m+1)/(2*n)
+
+    v01=(tz[:,:m]-tx)/n
+    v10=1-(tz[:,m:]-ty)/m
+
+    sx=np.cov(v01)
+    sy=np.cov(v10)
+
+    cov=sx/m+sy/n
+
+    return aucs,cov
+
+def delong_test(y,p1,p2):
+
+    order=np.argsort(-y)
+
+    y=y[order]
+    p1=p1[order]
+    p2=p2[order]
+
+    m=int(y.sum())
+
+    preds=np.vstack([p1,p2])
+
+    aucs,cov=fast_delong(preds,m)
+
+    diff=aucs[1]-aucs[0]
+
+    var=cov[0,0]+cov[1,1]-2*cov[0,1]
+
+    z=diff/np.sqrt(var)
+
+    p=2*(1-stats.norm.cdf(abs(z)))
+
+    return diff,p
+
+# ==============================
+# Generate final table
+# ==============================
+rows=[]
+
+for lp in clinical_scores:
+
+    name=lp.replace("_LP","")
+
+    # Cox models
+    cph1=CoxPHFitter().fit(
+        df[[time_col,event_col,lp]],
+        time_col,
+        event_col
+    )
+
+    r1=cph1.predict_partial_hazard(df).values.flatten()
+
+    cph2=CoxPHFitter().fit(
+        df[[time_col,event_col,lp,risk_col]],
+        time_col,
+        event_col
+    )
+
+    r2=cph2.predict_partial_hazard(df).values.flatten()
+
+    # Baseline metrics
+    c1=metric_cindex(y,t,r1)
+    c2=metric_cindex(y,t,r2)
+
+    a1=metric_auc(y,t,r1)
+    a2=metric_auc(y,t,r2)
+
+    p1=metric_pr(y,t,r1)
+    p2=metric_pr(y,t,r2)
+
+    c1_ci=bootstrap_ci(metric_cindex,y,t,r1)
+    c2_ci=bootstrap_ci(metric_cindex,y,t,r2)
+
+    a1_ci=bootstrap_ci(metric_auc,y,t,r1)
+    a2_ci=bootstrap_ci(metric_auc,y,t,r2)
+
+    p1_ci=bootstrap_ci(metric_pr,y,t,r1)
+    p2_ci=bootstrap_ci(metric_pr,y,t,r2)
+
+    # Delta metrics
+    dC, dC_ci, pC = bootstrap_delta(metric_cindex,y,t,r1,r2)
+    dPR,dPR_ci,pPR=bootstrap_delta(metric_pr,y,t,r1,r2)
+    dA,pA=delong_test(y,r1,r2)
+
+    rows.append({
+        "Model":name,
+        "C-index":f"{c1:.2f}({c1_ci[0]:.2f}-{c1_ci[1]:.2f})",
+        "AUC":f"{a1:.2f}({a1_ci[0]:.2f}-{a1_ci[1]:.2f})",
+        "PR-AUC":f"{p1:.2f}({p1_ci[0]:.2f}-{p1_ci[1]:.2f})",
+        "ΔC-index":f"{dC:.2f}({dC_ci[0]:.2f}-{dC_ci[1]:.2f}), p={pC:.3f}",
+        "ΔAUC":f"{dA:.2f}, p={pA:.3f}",
+        "ΔPR-AUC":f"{dPR:.2f}({dPR_ci[0]:.2f}-{dPR_ci[1]:.2f}), p={pPR:.3f}"
+    })
+
+final_table=pd.DataFrame(rows)
+
+pd.set_option("display.max_columns",None)
+
+print(final_table.to_string(index=False))
+
+final_table.to_csv(
+    "final_publication_table_full.csv",
+    index=False
+)

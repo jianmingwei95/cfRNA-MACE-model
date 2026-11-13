@@ -73,5 +73,5 @@ res <- do.call(rbind, lapply(names(EP), function(k) {
 }))
 write.csv(res, file.path(OUT, "fig4d_metrics.csv"), row.names = FALSE)
 cat("[check] events per end point:", paste(unique(res[, c("endpoint", "events")])$events, collapse = ","), "\n")
-cat(sprintf("[check] MACE CV C-index = %.3f (previous 10-fold CV estimate 0.672)\n", res$estimate[res$endpoint == "MACE" & res$metric == "C-index"]))
+cat(sprintf("[check] MACE LOOCV C-index = %.3f\n", res$estimate[res$endpoint == "MACE" & res$metric == "C-index"]))
 cat("[ok] written to 03_results/fig4\n")

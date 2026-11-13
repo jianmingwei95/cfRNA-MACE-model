@@ -1,6 +1,5 @@
 ## ============================================================================
-## Figure 4d data: locked five-gene model (refitted on the full discovery cohort,
-## model_5gene.rds) evaluated on 8 end points in the discovery cohort (apparent).
+## Figure 4d data: locked five-gene model (model_5gene.rds, see fit_locked_model.R) evaluated on 8 end points in the discovery cohort (apparent).
 ##   risk score = frozen linear predictor; high risk = top tertile of discovery
 ##   scores (threshold saved for identical use in the replication cohort)
 ##   C-index from time to event; ROC-AUC, PR-AUC, sensitivity, specificity, NPV
@@ -43,5 +42,5 @@ res <- do.call(rbind, lapply(names(EP), function(k) {
              estimate = unname(est), lo = apply(bt, 2, quantile, .025, na.rm = TRUE), hi = apply(bt, 2, quantile, .975, na.rm = TRUE))
 }))
 write.csv(res, file.path(OUT, "fig4d_metrics_locked.csv"), row.names = FALSE)
-cat(sprintf("[check] MACE apparent C-index = %.3f (Table 2 apparent: 0.784)\n", res$estimate[res$endpoint == "MACE" & res$metric == "C-index"]))
+cat(sprintf("[check] MACE apparent C-index = %.3f\n", res$estimate[res$endpoint == "MACE" & res$metric == "C-index"]))
 cat("[ok] written: fig4d_metrics_locked.csv, locked_threshold.csv\n")

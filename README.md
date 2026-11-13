@@ -8,31 +8,26 @@ A five-gene cell-free RNA (cfRNA) score (SPINT2, EIF4E, TRIM25, EI24, F11R) was 
 
 | Path | Content |
 |---|---|
-| `cfRNA_MACE_nested_LOOCV.py` | Strict nested leave-one-out cross-validation (V1) |
-| `Permutation test` | Permutation test for the LOOCV pipeline, HPC version (V1) |
-| `Benchmark score2 model` | Benchmark against a clinical score with Cox regression (V1) |
-| `model_development/` | Model development and internal validation in the discovery cohort (V2) |
-| `external_validation/` | Application of the locked model to the independent replication cohort (V2) |
-| `clinical_benchmark/` | Comparison with established clinical risk scores and added value of the cfRNA score (V2) |
+| `cfRNA_MACE_nested_LOOCV.py` | Gene selection: nested leave-one-out cross-validation in the discovery cohort (ten genes per fold) |
+| `Permutation test` | Permutation test for the nested LOOCV pipeline (HPC version) |
+| `model_development/` | Final five-gene model: fitting, locking and internal validation in the discovery cohort |
+| `external_validation/` | Application of the locked model to the independent replication cohort |
+| `clinical_benchmark/` | Comparison with established clinical risk scores and added value of the cfRNA score |
 
 ### `model_development/`
 
 | Script | Purpose |
 |---|---|
-| `user_loocv_pipeline_fast.py` | Nested LOOCV feature selection and Cox model (Python; vectorised version of the original pipeline) |
-| `loocv_topK_reimplementation.R` | Independent R re-implementation of the nested LOOCV with a configurable number of genes |
-| `fig4_compute.R` | LOOCV selection frequency, univariable hazard ratios and cross-validated performance of the five-gene model across eight end points |
-| `fig4_compute_locked.R` | Final five-gene model refitted on the full discovery cohort and locked (coefficients and risk threshold) |
-| `internal_discovery_5gene_endpoints.R` | Apparent and 10-fold cross-validated performance in the discovery cohort |
+| `fit_locked_model.R` | Ridge-penalised Cox model with the five genes fitted on the full discovery cohort (penalty by 10-fold cross-validation); saves the locked model, the discovery reference distribution and the score tertiles |
+| `fig4_compute.R` | Selection frequency and univariable hazard ratios of the ten most frequently selected genes; leave-one-out cross-validation of the five-gene model across eight end points |
+| `fig4_compute_locked.R` | Apparent performance of the locked model in the discovery cohort and the locked risk threshold (upper tertile) |
 
 ### `external_validation/`
 
 | Script | Purpose |
 |---|---|
-| `cfRNA_qc_batchcorrect_3batch277_g70.R` | Quality control, normalisation and batch correction of the replication cohort (three sequencing batches, n = 277) |
-| `mace_subtype_validation_3batch.R` | Locked five-gene score applied without refitting; MACE and component end points |
-| `fig5b_compute_replication_v2.R` | Discrimination and classification metrics with bootstrap confidence intervals in the replication cohort |
-| `generalisation_internal_vs_external.R` | Internal (apparent, cross-validated) versus external performance across eight end points |
+| `mace_subtype_validation_3batch.R` | Replication cohort (three sequencing batches, n = 277): quality control, normalisation, batch correction, reference quantile mapping and scoring with the locked model without refitting; C-index, 3-year AUC and hazard ratio per SD for eight end points |
+| `fig5b_compute_replication_v2.R` | Discrimination and classification metrics at the locked threshold with bootstrap confidence intervals |
 
 ### `clinical_benchmark/`
 
@@ -47,7 +42,7 @@ A five-gene cell-free RNA (cfRNA) score (SPINT2, EIF4E, TRIM25, EI24, F11R) was 
 
 Paths are written as `path/to/project/...`; replace this prefix with your own project root, which is expected to contain `01_raw_data/`, `02_processed_data/` and `03_results/`. Two scripts in `clinical_benchmark/` read `benchmark_clinical_scores.R` or `benchmark_locked_weights.R` from `clinical_benchmark/` under the project root, so keep that folder name.
 
-Software: R (survival, glmnet, sva, limma, haven, mice, data.table, survivalROC, timeROC, pROC) and Python 3 (pandas, numpy, scikit-learn, lifelines, scikit-survival).
+Software: R (survival, glmnet, sva, limma, haven, mice, data.table, survivalROC, timeROC, pROC, PRROC, dcurves) and Python 3 (pandas, numpy, scikit-learn, lifelines, scikit-survival).
 
 ## Data
 
